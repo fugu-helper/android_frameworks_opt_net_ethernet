@@ -59,4 +59,24 @@ public class EthernetConfigStore extends IpConfigStore {
         networks.put(0, config);
         writeIpAndProxyConfigurations(ipConfigFile, networks);
     }
-}
+
+    /* Dual Ethernet Changes Start */
+    public IpConfiguration readPluggedInEthernetIpAndProxyConfigurations() {
+
+        SparseArray<IpConfiguration> networks = readIpAndProxyConfigurations(ipConfigFile);
+
+        /* Check if multiple ip config values are avaialble */
+        if (networks.size() > 1) {
+            return networks.valueAt(1);
+        }
+        /* As a fallback return proxy of default netwrork */
+        return new IpConfiguration(IpAssignment.DHCP, ProxySettings.NONE, null, null);
+    }
+
+    public void writePluggedInEthernetIpAndProxyConfigurations(IpConfiguration config) {
+        SparseArray<IpConfiguration> networks = readIpAndProxyConfigurations(ipConfigFile);
+        networks.put(1, config);
+        writeIpAndProxyConfigurations(ipConfigFile, networks);
+    }
+    /* Dual Ethernet Changes End */
+ }

@@ -31,9 +31,16 @@ import android.net.NetworkCapabilities;
 import android.net.NetworkFactory;
 import android.net.NetworkInfo;
 import android.net.NetworkInfo.DetailedState;
+/* Dual Ethernet Changes Start */
+import android.net.NetworkUtils;
+/* Dual Ethernet Changes End */
 import android.net.StaticIpConfiguration;
+/* Dual Ethernet Changes Start */
+import android.net.StringNetworkSpecifier;
+/* Dual Ethernet Changes End */
 import android.net.ip.IpManager;
 import android.net.ip.IpManager.ProvisioningConfiguration;
+import android.net.ip.IpManager.WaitForProvisioningCallback;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.INetworkManagementService;
@@ -44,8 +51,11 @@ import android.os.ServiceManager;
 import android.text.TextUtils;
 import android.util.Log;
 /* Dual Ethernet Changes start */
-import android.net.NetworkUtils;
+import android.content.BroadcastReceiver;
+import android.content.Intent;
+import android.content.IntentFilter;
 /* Dual Ethernet Changes end */
+
 import com.android.internal.util.IndentingPrintWriter;
 import com.android.server.net.BaseNetworkObserver;
 
@@ -54,9 +64,6 @@ import java.io.PrintWriter;
 import java.util.Arrays;
 import java.util.concurrent.CountDownLatch;
 
-import android.content.BroadcastReceiver;
-import android.content.Intent;
-import android.content.IntentFilter;
 /**
  * Manages connectivity for an Ethernet interface.
  *
@@ -74,10 +81,10 @@ import android.content.IntentFilter;
  *
  * @hide
  */
-class EthernetNetworkFactory {
+class PluggedinEthernetNetworkFactory {
     private static final String NETWORK_TYPE = "Ethernet";
-    private static final String TAG = "EthernetNetworkFactory";
-    private static final int NETWORK_SCORE = 70;
+    private static final String TAG = "PluggedinEthernetNetworkFactory";
+    private static final int NETWORK_SCORE = 65;
     private static final boolean DBG = true;
 
     /** Tracks interface changes. Called from NetworkManagementService. */
@@ -101,6 +108,9 @@ class EthernetNetworkFactory {
     /** Product-dependent regular expression of interface names we track. */
     private static String mIfaceMatch = "";
 
+    private static final String ETH1="eth1";
+    private static final String INTEL_NETWORK_SPECIFIER = "pluggedinethernet";
+
     /** To notify Ethernet status. */
     private final RemoteCallbackList<IEthernetServiceListener> mListeners;
 
@@ -115,41 +125,41 @@ class EthernetNetworkFactory {
     BroadcastReceiver mBroadcast =  new BroadcastReceiver() {
         @Override
         public void onReceive(Context mContext, Intent intent) {
-	     String action = intent.getAction();
-	     if (action.equals(ConnectivityManager.CONNECTIVITY_ACTION)) {
+            String action = intent.getAction();
+            if (action.equals(ConnectivityManager.CONNECTIVITY_ACTION)) {
 
-		NetworkInfo info = (NetworkInfo)intent.getExtra(
-		     ConnectivityManager.EXTRA_NETWORK_INFO);
+                NetworkInfo info = (NetworkInfo)intent.getExtra(
+                        ConnectivityManager.EXTRA_NETWORK_INFO);
 
-		if (info.getDetailedState() != mNetworkInfo.getDetailedState())
-		     return;
+                if (info.getDetailedState() != mNetworkInfo.getDetailedState())
+                    return;
 
-		boolean availability;
-		if (info.getDetailedState() == DetailedState.CONNECTED)
-		{
-		     availability = true;
-		}
-		else {
-		     availability = false;
-		}
-        BroadcastMessage(availability);
-	    }
-	}
+                boolean availability;
+                if (info.getDetailedState() == DetailedState.CONNECTED)
+                {
+                    availability = true;
+                }
+                else {
+                    availability = false;
+                }
+                BroadcastMessage(availability);
+            }
+        }
     };
 
     private void BroadcastMessage(boolean available) {
-	    int n = mListeners.beginBroadcast();
-            for (int i = 0; i < n; i++) {
-                try {
-                    mListeners.getBroadcastItem(i).onAvailabilityChanged(available);
-                } catch (RemoteException e) {
-		    Log.e(TAG, "Error sending broadcast. " + e.getMessage());
-                }
+        int n = mListeners.beginBroadcast();
+        for (int i = 0; i < n; i++) {
+            try {
+                mListeners.getBroadcastItem(i).onAvailabilityChanged(available);
+            } catch (RemoteException e) {
+                Log.e(TAG, "Error sending broadcast. " + e.getMessage());
             }
-            mListeners.finishBroadcast();
+        }
+        mListeners.finishBroadcast();
     }
 
-    EthernetNetworkFactory(RemoteCallbackList<IEthernetServiceListener> listeners) {
+    PluggedinEthernetNetworkFactory(RemoteCallbackList<IEthernetServiceListener> listeners) {
         initNetworkCapabilities();
         clearInfo();
         mListeners = listeners;
@@ -185,17 +195,19 @@ class EthernetNetworkFactory {
             mIpManager.shutdown();
             mIpManager = null;
         }
+
         // ConnectivityService will only forget our NetworkAgent if we send it a NetworkInfo object
         // with a state of DISCONNECTED or SUSPENDED. So we can't simply clear our NetworkInfo here:
         // that sets the state to IDLE, and ConnectivityService will still think we're connected.
         //
         mNetworkInfo.setDetailedState(DetailedState.DISCONNECTED, null, mHwAddr);
         if (mNetworkAgent != null) {
+            Log.i(TAG,"calling updateAgent from stopip\n");
             updateAgent();
             mNetworkAgent = null;
         }
         clearInfo();
-        if(sendBroadcast == true) {
+        if( sendBroadcast == true ) {
             BroadcastMessage(false);
         }
     }
@@ -208,7 +220,7 @@ class EthernetNetworkFactory {
         if (!mIface.equals(iface)) {
             return;
         }
-        Log.d(TAG, "updateInterface: " + iface + " link " + (up ? "up" : "down"));
+        Log.i(TAG, "updateInterface: " + iface + " link " + (up ? "up" : "down"));
 
         if(mLinkUp == up) {
             return;
@@ -217,15 +229,18 @@ class EthernetNetworkFactory {
         if (up) {
             maybeStartIpManager();
         } else {
+            Log.i(TAG,"calling stopIPManager from updateInterfaceState\n");
             stopIpManager(true);
+
         }
+
     }
 
     private class InterfaceObserver extends BaseNetworkObserver {
         @Override
         public void interfaceLinkStateChanged(String iface, boolean up) {
+
             if(!shouldWeTrackInterface(iface)) {
-                Log.i(TAG,"interfaceLinkStateChanged iface is not eth0 so retuning" + "up= " + up);
                 return;
             }
             mHandler.post(() -> {
@@ -235,8 +250,8 @@ class EthernetNetworkFactory {
 
         @Override
         public void interfaceAdded(String iface) {
+
             if(!shouldWeTrackInterface(iface)) {
-                Log.i(TAG," single ethernet interfaceAdded returned " + iface );
                 return;
             }
             mHandler.post(() -> {
@@ -273,9 +288,11 @@ class EthernetNetworkFactory {
                 setInterfaceInfo(iface, config.getHardwareAddress());
                 mNetworkInfo.setIsAvailable(true);
                 mNetworkInfo.setExtraInfo(mHwAddr);
+
             } else {
                 Log.e(TAG, "Interface unexpectedly changed from " + iface + " to " + mIface);
                 mNMService.setInterfaceDown(iface);
+
             }
         } catch (RemoteException | IllegalStateException e) {
             // Either the system is crashing or the interface has disappeared. Just ignore the
@@ -287,10 +304,11 @@ class EthernetNetworkFactory {
     private boolean maybeTrackInterface(String iface) {
         // If we don't already have an interface, and if this interface matches
         // our regex, start tracking it.
-        if (!shouldWeTrackInterface(iface) || isTrackingInterface())
+        if (!shouldWeTrackInterface(iface) || isTrackingInterface()) {
+            Log.i(TAG, "dual maybeTrackInterface return false " + iface);
             return false;
-
-        Log.d(TAG, "Started tracking interface " + iface);
+        }
+        Log.i(TAG, "Started tracking interface " + iface);
         setInterfaceUp(iface);
         return true;
     }
@@ -299,7 +317,6 @@ class EthernetNetworkFactory {
         if (!iface.equals(mIface))
             return false;
 
-        Log.d(TAG, "Stopped tracking interface " + iface);
         setInterfaceInfo("", null);
         stopIpManager(true);
         return true;
@@ -316,7 +333,7 @@ class EthernetNetworkFactory {
                 mNMService.setInterfaceConfig(mIface, config);
                 return true;
             } catch(RemoteException|IllegalStateException e) {
-               Log.e(TAG, "Setting static IP address failed: " + e.getMessage());
+                Log.e(TAG, "Setting static IP address failed: " + e.getMessage());
             }
         } else {
             Log.e(TAG, "Invalid static IP configuration.");
@@ -348,6 +365,7 @@ class EthernetNetworkFactory {
         mLinkProperties = linkProperties;
         mNetworkInfo.setDetailedState(DetailedState.CONNECTED, null, mHwAddr);
         BroadcastMessage(true);
+
         // Create our NetworkAgent.
         mNetworkAgent = new NetworkAgent(mHandler.getLooper(), mContext,
                 NETWORK_TYPE, mNetworkInfo, mNetworkCapabilities, mLinkProperties,
@@ -391,25 +409,27 @@ class EthernetNetworkFactory {
 
         LinkProperties linkProperties;
 
-        IpConfiguration config = mEthernetManager.getConfiguration();
+        //IpConfiguration config = mEthernetManager.getConfiguration();
+        IpConfiguration config = mEthernetManager.getPluggedInEthernetConfiguration();
 
         if (config.getIpAssignment() == IpAssignment.STATIC) {
+
             if (!setStaticIpAddress(config.getStaticIpConfiguration())) {
                 // We've already logged an error.
                 return;
             }
-            if(mNetworkAgent != null) {
+            if(mNetworkAgent!=null) {
                 Log.e(TAG, "Already have a NetworkAgent - aborting new request");
                 mNetworkAgent = null;
             }
             linkProperties = config.getStaticIpConfiguration().toLinkProperties(mIface);
             if (config.getProxySettings() == ProxySettings.STATIC ||
-                config.getProxySettings() == ProxySettings.PAC) {
+                        config.getProxySettings() == ProxySettings.PAC) {
                 linkProperties.setHttpProxy(config.getHttpProxy());
             }
 
             String tcpBufferSizes = mContext.getResources().getString(
-                com.android.internal.R.string.config_ethernet_tcp_buffers);
+                     com.android.internal.R.string.config_ethernet_tcp_buffers);
             if (TextUtils.isEmpty(tcpBufferSizes) == false) {
                 linkProperties.setTcpBufferSizes(tcpBufferSizes);
             }
@@ -422,16 +442,17 @@ class EthernetNetworkFactory {
             mNetworkAgent = new NetworkAgent(mHandler.getLooper(), mContext,
                 NETWORK_TYPE, mNetworkInfo, mNetworkCapabilities, mLinkProperties,
                 NETWORK_SCORE) {
-                public void unwanted() {
-                    if (this == mNetworkAgent) {
-                         stopIpManager(true);
-                    } else if (mNetworkAgent != null) {
-                        Log.d(TAG, "Ignoring unwanted as we have a more modern " +
+            public void unwanted() {
+                if (this == mNetworkAgent) {
+                    stopIpManager(true);
+                } else if (mNetworkAgent != null) {
+                    Log.d(TAG, "Ignoring unwanted as we have a more modern " +
                             "instance");
-                      }  // Otherwise, we've already called stopIpManager.
-                }
+                }  // Otherwise, we've already called stopIpManager.
+            }
         };
-    } else {
+
+        } else {
             mNetworkInfo.setDetailedState(DetailedState.OBTAINING_IPADDR, null, mHwAddr);
             IpManager.Callback ipmCallback = new IpManager.Callback() {
                 @Override
@@ -470,6 +491,7 @@ class EthernetNetworkFactory {
                             .build();
             mIpManager.startProvisioning(provisioningConfiguration);
         }
+
     }
 
     /**
@@ -482,6 +504,7 @@ class EthernetNetworkFactory {
         IBinder b = ServiceManager.getService(Context.NETWORKMANAGEMENT_SERVICE);
         mNMService = INetworkManagementService.Stub.asInterface(b);
         mEthernetManager = (EthernetManager) context.getSystemService(Context.ETHERNET_SERVICE);
+
         // Interface match regex.
         mIfaceMatch = context.getResources().getString(
                 com.android.internal.R.string.config_ethernet_iface_regex);
@@ -532,13 +555,17 @@ class EthernetNetworkFactory {
     }
 
     public void stop() {
+
         stopIpManager(true);
+
+        /* Dual Ethernet Changes start */
         try {
             mNMService.setInterfaceDown(mIface);
             mNMService.clearInterfaceAddresses(mIface);
         } catch (RemoteException e) {
-            Log.e(TAG, "Failed to set interface down " + e.getMessage());
+            Log.d(TAG, "Failed to set interface down " + e.getMessage());
         }
+
         setInterfaceInfo("", null);
         mFactory.unregister();
         mContext.unregisterReceiver(mBroadcast);
@@ -549,6 +576,7 @@ class EthernetNetworkFactory {
         mNetworkCapabilities.addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET);
         mNetworkCapabilities.addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
         mNetworkCapabilities.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED);
+        mNetworkCapabilities.setNetworkSpecifier(new StringNetworkSpecifier(INTEL_NETWORK_SPECIFIER));
         // We have no useful data on bandwidth. Say 100M up and 100M down. :-(
         mNetworkCapabilities.setLinkUpstreamBandwidthKbps(100 * 1000);
         mNetworkCapabilities.setLinkDownstreamBandwidthKbps(100 * 1000);
@@ -571,8 +599,35 @@ class EthernetNetworkFactory {
         mNetworkInfo.setIsAvailable(available);
 
         if (oldAvailable != available) {
+            Log.i(TAG,"Sending broadcast from setInterfaceInfo " + available);
             BroadcastMessage(available);
         }
+    }
+
+    /**
+     * Gets PluggedIn Ethernet Link Properties.
+     * @return the Ethernet Configuration, contained in {@link IpConfiguration}.
+     */
+    public LinkProperties getLinkProperties() {
+        Log.d(TAG, "LinkProperties: " + mLinkProperties);
+        return mLinkProperties;
+    }
+
+    /**
+     * Return the NetworkInfo of the PluggedIn Ethernet
+     * @return the NetworkInfo, contained in {@link NetworkInfo}.
+     */
+    public NetworkInfo getNetworkInfo() {
+        Log.d(TAG, "NetworkInfo: " + mNetworkInfo);
+        return mNetworkInfo;
+    }
+
+    /**
+     * Return the IpConfiguration of the PluggedIn Ethernet.
+     * @return the IpConfiguration, contained in {@link IpConfiguration}.
+     */
+    public IpConfiguration getIpConfiguration() {
+        return null;
     }
 
     private void postAndWaitForRunnable(Runnable r) throws InterruptedException {
@@ -587,22 +642,6 @@ class EthernetNetworkFactory {
         latch.await();
     }
 
-    /**
-     * Gets PluggedIn Ethernet Link Properties.
-     * @return the Ethernet Configuration, contained in {@link IpConfiguration}.
-     */
-    public LinkProperties getLinkProperties() {
-        return mLinkProperties;
-    }
-
-    /**
-     * Return the NetworkInfo of the PluggedIn Ethernet
-     * @return the NetworkInfo, contained in {@link NetworkInfo}.
-     */
-    public NetworkInfo getNetworkInfo() {
-        return mNetworkInfo;
-    }
-
     boolean shouldWeTrackInterface(String iface) {
 
         String modaliasPath = "/sys/class/net/" + iface + "/device/modalias";
@@ -615,8 +654,8 @@ class EthernetNetworkFactory {
 
             String line = br.readLine ();
             Log.d (TAG, "MODALIAS: " + line);
-            if (line.toLowerCase().contains("pci") && (iface.matches(mIfaceMatch))) {
-                Log.d (TAG, "PCI Interface start Tracking: " + line);
+            if (line.toLowerCase().contains("usb") && (iface.matches(mIfaceMatch))) {
+                Log.d (TAG, "USB Interface start Tracking: " + line);
                 shouldTrack = true;
             }
             is.close ();

@@ -23,17 +23,27 @@ import android.net.IEthernetServiceListener;
 import android.net.IpConfiguration;
 import android.net.IpConfiguration.IpAssignment;
 import android.net.IpConfiguration.ProxySettings;
+/* Dual Ethernet Changes Start */
+import android.net.LinkProperties;
+import android.net.NetworkInfo;
+/* Dual Ethernet Changes End */
+import android.net.ProxyInfo;
 import android.os.Binder;
+import android.os.IBinder;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.INetworkManagementService;
 import android.os.RemoteCallbackList;
 import android.os.RemoteException;
 import android.provider.Settings;
+import android.os.ServiceManager;
+import android.os.SystemProperties;
 import android.util.Log;
 import android.util.PrintWriterPrinter;
 
 import com.android.internal.util.IndentingPrintWriter;
 
+import java.lang.Integer;
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -49,14 +59,36 @@ public class EthernetServiceImpl extends IEthernetManager.Stub {
 
     private final Context mContext;
     private final EthernetConfigStore mEthernetConfigStore;
+    private final INetworkManagementService mNMService;
     private final AtomicBoolean mStarted = new AtomicBoolean(false);
+    /* Dual Ethernet Changes Start */
+    private final AtomicBoolean mPluggedInEthernetStarted = new AtomicBoolean(false);
     private IpConfiguration mIpConfiguration;
 
+    private IpConfiguration mPluggedInEthernetIpConfiguration;
+    /* Dual Ethernet Changes End */
+    private ProxyInfo MyHttpProxy;
     private Handler mHandler;
+    /* Dual Ethernet Changes Start */
+    private Handler  mPluggedinEthHandler;
+    /* Dual Ethernet Changes End */
     private final EthernetNetworkFactory mTracker;
+    /* Dual Ethernet Changes Start */
+    private final PluggedinEthernetNetworkFactory  mEth1Tracker;
+    /* Dual Ethernet Changes End */
+    private String Proxyhost;
+    private String Proxyport;
+    /* Dual Ethernet Changes Start */
+    private String PluggedInEthernetProxyhost;
+    private String PluggedInEthernetProxyport;
+    /* Dual Ethernet Changes Start */
     private final RemoteCallbackList<IEthernetServiceListener> mListeners =
             new RemoteCallbackList<IEthernetServiceListener>();
 
+    /* Dual Ethernet Changes Start */
+    private final RemoteCallbackList<IEthernetServiceListener> mEth1Listeners =
+            new RemoteCallbackList<IEthernetServiceListener>();
+    /* Dual Ethernet Changes End */
     public EthernetServiceImpl(Context context) {
         mContext = context;
         Log.i(TAG, "Creating EthernetConfigStore");
@@ -64,8 +96,44 @@ public class EthernetServiceImpl extends IEthernetManager.Stub {
         mIpConfiguration = mEthernetConfigStore.readIpAndProxyConfigurations();
 
         Log.i(TAG, "Read stored IP configuration: " + mIpConfiguration);
+        Log.i(TAG, "Get proxy info from system properties");
+        Proxyhost = SystemProperties.get("persist.ethernet.proxyhost", "");
+        Log.i(TAG, "Proxyhost: --" + Proxyhost);
+        Proxyport = SystemProperties.get("persist.ethernet.proxyport", "");
+        Log.i(TAG, "Proxyport: --" + Proxyport);
+        if (!Proxyhost.equals("") && !Proxyport.equals("")){
+            mIpConfiguration.setProxySettings(ProxySettings.STATIC);
+            MyHttpProxy = new ProxyInfo(Proxyhost,Integer.parseInt(Proxyport),null);
+            mIpConfiguration.setHttpProxy(MyHttpProxy);
+        }
+        Log.i(TAG, "New IP Configuration: " + mIpConfiguration);
+        //Proxy settings for PluggedIn Ethernet Starts
+        mPluggedInEthernetIpConfiguration =
+                        mEthernetConfigStore.readPluggedInEthernetIpAndProxyConfigurations();
+
+        Log.i(TAG, "PluggedIn Ethernet IPConfiguration: " + mPluggedInEthernetIpConfiguration);
+        Log.i(TAG, "Get proxy info from system properties");
+
+        PluggedInEthernetProxyhost = SystemProperties.get("persist.ethernet.pluggedin.proxyhost", "");
+        PluggedInEthernetProxyport = SystemProperties.get("persist.ethernet.pluggedin.proxyport", "");
+
+        Log.i(TAG, "PluggedInEthernetProxyhost: --" + PluggedInEthernetProxyhost);
+        Log.i(TAG, "PluggedInEthernetProxyport: --" + PluggedInEthernetProxyport);
+
+        if (!PluggedInEthernetProxyport.equals("") && !PluggedInEthernetProxyport.equals("")){
+            mPluggedInEthernetIpConfiguration.setProxySettings(ProxySettings.STATIC);
+            MyHttpProxy = new ProxyInfo(Proxyhost,Integer.parseInt(Proxyport),null);
+            mPluggedInEthernetIpConfiguration.setHttpProxy(MyHttpProxy);
+        }
+        Log.i(TAG, "PluggedIn Ethernet IPConfiguration: " + mPluggedInEthernetIpConfiguration);
+        //Proxy settings for PluggedIn Ethernet Ends
+        IBinder b = ServiceManager.getService(Context.NETWORKMANAGEMENT_SERVICE);
+        mNMService = INetworkManagementService.Stub.asInterface(b);
 
         mTracker = new EthernetNetworkFactory(mListeners);
+        /* Dual Ethernet Changes Start */
+        mEth1Tracker = new PluggedinEthernetNetworkFactory(mEth1Listeners);
+        /* Dual Ethernet Changes End */
     }
 
     private void enforceAccessPermission() {
@@ -88,7 +156,14 @@ public class EthernetServiceImpl extends IEthernetManager.Stub {
         mHandler = new Handler(handlerThread.getLooper());
 
         mTracker.start(mContext, mHandler);
+        /* Dual Ethernet Changes Start */
+        HandlerThread PluggedinEthhandlerThread = new HandlerThread("PluggedinEthernetThread");
+        PluggedinEthhandlerThread.start();
+        mPluggedinEthHandler = new Handler(PluggedinEthhandlerThread.getLooper());
 
+        mEth1Tracker.start(mContext,mPluggedinEthHandler);
+        mPluggedInEthernetStarted.set(true);
+        /* Dual Ethernet Changes End */
         mStarted.set(true);
     }
 
@@ -190,4 +265,133 @@ public class EthernetServiceImpl extends IEthernetManager.Stub {
         mHandler.dump(new PrintWriterPrinter(pw), "EthernetServiceImpl");
         pw.decreaseIndent();
     }
-}
+
+    @Override
+    public void reconnect() {
+        enforceConnectivityInternalPermission();
+
+        mTracker.start(mContext, mHandler);
+    }
+
+    @Override
+    public void teardown() {
+        enforceConnectivityInternalPermission();
+
+        mTracker.stop();
+    }
+
+    /**
+     * Gets LAN Ethernet Link Properties.
+     * @return the Ethernet Configuration, contained in {@link IpConfiguration}.
+     */
+    public LinkProperties getEthernetLinkProperties() {
+        enforceAccessPermission();
+        return mTracker.getLinkProperties();
+    }
+
+    /**
+     * Return the NetworkInfo of the LAN Ethernet
+     * @return the NetworkInfo, contained in {@link NetworkInfo}.
+     */
+    public NetworkInfo getEthernetNetworkInfo() {
+        enforceAccessPermission();
+        return mTracker.getNetworkInfo();
+    }
+
+    /**
+     * Addes a listener.
+     * @param listener A {@link IEthernetServiceListener} to add.
+     * Indicates whether the PluggedIn Ethernet is connected (ETH1).
+     */
+    @Override
+    public boolean isPluggedInEthAvailable() {
+        enforceAccessPermission();
+        return mEth1Tracker.isTrackingInterface();
+    }
+
+    @Override
+    public void connectPluggedinEth() {
+        enforceConnectivityInternalPermission();
+        mEth1Tracker.start(mContext,mPluggedinEthHandler);
+    }
+
+    @Override
+    public void teardownPluggedinEth() {
+        enforceConnectivityInternalPermission();
+        mEth1Tracker.stop();
+    }
+
+    public void addPluggedinEthListener(IEthernetServiceListener listener) {
+        if (listener == null) {
+            throw new IllegalArgumentException("listener must not be null");
+        }
+        enforceAccessPermission();
+        mEth1Listeners.register(listener);
+    }
+
+    /**
+     * Removes a listener.
+     * @param listener A {@link IEthernetServiceListener} to remove.
+     */
+    public void removePluggedinEthListener(IEthernetServiceListener listener) {
+        if (listener == null) {
+            throw new IllegalArgumentException("listener must not be null");
+        }
+        enforceAccessPermission();
+        mEth1Listeners.unregister(listener);
+    }
+
+    /**
+     * Gets PluggedIn Ethernet Link Properties.
+     * @return the Ethernet Configuration, contained in {@link IpConfiguration}.
+     */
+    public LinkProperties getPluggedinLinkProperties() {
+        enforceAccessPermission();
+        return mEth1Tracker.getLinkProperties();
+    }
+
+    /**
+     * Return the NetworkInfo of the PluggedIn Ethernet
+     * @return the NetworkInfo, contained in {@link NetworkInfo}.
+     */
+    public NetworkInfo getPluggedinNetworkInfo() {
+        enforceAccessPermission();
+        return mEth1Tracker.getNetworkInfo();
+    }
+
+    /**
+     * Get PluggedInEthernet configuration
+     * @return the Ethernet Configuration, contained in {@link IpConfiguration}.
+     */
+    @Override
+    public IpConfiguration getPluggedInEthernetConfiguration() {
+        enforceAccessPermission();
+
+        synchronized (mPluggedInEthernetIpConfiguration) {
+            return new IpConfiguration(mPluggedInEthernetIpConfiguration);
+        }
+    }
+
+    /**
+     * Set PluggedInEthernet configuration
+     */
+    @Override
+    public void setPluggedInEthernetConfiguration(IpConfiguration config) {
+        if (!mPluggedInEthernetStarted.get()) {
+            Log.w(TAG, "System isn't ready enough to change ethernet configuration");
+        }
+        enforceConnectivityInternalPermission();
+        synchronized (mPluggedInEthernetIpConfiguration) {
+            mEthernetConfigStore.writePluggedInEthernetIpAndProxyConfigurations(config);
+
+            // TODO: this does not check proxy settings, gateways, etc.
+            // Fix this by making IpConfiguration a complete representation of static configuration.
+            if (!config.equals(mPluggedInEthernetIpConfiguration)) {
+                mPluggedInEthernetIpConfiguration = new IpConfiguration(config);
+                mEth1Tracker.stop();
+                mEth1Tracker.start(mContext, mHandler);
+            }
+        }
+    }
+    /* Dual Ethernet Changes End */
+ }
